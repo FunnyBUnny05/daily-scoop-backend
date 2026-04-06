@@ -20,15 +20,11 @@ webPush.setVapidDetails(
   privateVapidKey
 );
 
-// In-memory database (no native binaries needed!)
+// In-memory store
 const store = {
-  subscriptions: {},  // keyed by endpoint
-  status: {}          // keyed by date string
-};
-
-const getTodayStr = () => {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  subscriptions: {},       // keyed by endpoint
+  lastTakenTimestamp: null, // epoch ms of last "Mark as Taken"
+  lastReminderSent: null   // epoch ms of last reminder push (to avoid spam)
 };
 
 // Routes
@@ -44,10 +40,10 @@ app.post('/subscribe', (req, res) => {
 });
 
 app.post('/mark-taken', (req, res) => {
-  const dateStr = getTodayStr();
-  store.status[dateStr] = true;
-  console.log(`Marked as taken for ${dateStr}`);
-  res.status(200).json({ message: 'Marked as taken for today.' });
+  store.lastTakenTimestamp = Date.now();
+  store.lastReminderSent = null; // Reset so we can remind again 24h from now
+  console.log(`Marked as taken at ${new Date(store.lastTakenTimestamp).toISOString()}`);
+  res.status(200).json({ message: 'Marked as taken.', timestamp: store.lastTakenTimestamp });
 });
 
 app.get('/test-push', (req, res) => {
@@ -56,7 +52,15 @@ app.get('/test-push', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.json({ status: 'Daily Scoop Backend is running!', subscriptions: Object.keys(store.subscriptions).length });
+  const msSinceTaken = store.lastTakenTimestamp ? Date.now() - store.lastTakenTimestamp : null;
+  const hoursSinceTaken = msSinceTaken ? (msSinceTaken / 1000 / 60 / 60).toFixed(1) : 'never';
+  res.json({
+    status: 'Daily Scoop Backend is running!',
+    subscriptions: Object.keys(store.subscriptions).length,
+    lastTaken: store.lastTakenTimestamp ? new Date(store.lastTakenTimestamp).toISOString() : 'never',
+    hoursSinceLastTaken: hoursSinceTaken,
+    nextReminderIn: store.lastTakenTimestamp ? `${Math.max(0, 24 - parseFloat(hoursSinceTaken)).toFixed(1)} hours` : 'waiting for first dose'
+  });
 });
 
 // Logic to send push
@@ -66,10 +70,10 @@ const sendPushToAll = (title, body) => {
     body: body,
     icon: '/daily-scoop/favicon.svg'
   });
-  
+
   const endpoints = Object.keys(store.subscriptions);
   console.log(`Sending push to ${endpoints.length} subscriber(s)...`);
-  
+
   endpoints.forEach(endpoint => {
     const sub = {
       endpoint: endpoint,
@@ -85,22 +89,39 @@ const sendPushToAll = (title, body) => {
   });
 };
 
-// Cron Job: Run at exactly 5 PM Israel time every day
-cron.schedule('0 14 * * *', () => {
-    const dateStr = getTodayStr();
-    console.log(`Cron triggered for ${dateStr}. Checking status...`);
-    
-    if (!store.status[dateStr]) {
-      console.log("Creatine NOT taken yet. Sending push notification.");
-      sendPushToAll("Daily Scoop 🥄", "Did you take your creatine today? Open the app to mark it down!");
-    } else {
-      console.log("Creatine was taken. No push needed.");
+// Check every 30 minutes: has it been 24+ hours since last taken?
+cron.schedule('*/30 * * * *', () => {
+  const now = Date.now();
+  console.log(`[Cron] Checking at ${new Date(now).toISOString()}...`);
+
+  // If never taken, don't spam
+  if (!store.lastTakenTimestamp) {
+    console.log('[Cron] No dose recorded yet. Skipping.');
+    return;
+  }
+
+  const hoursSinceTaken = (now - store.lastTakenTimestamp) / 1000 / 60 / 60;
+  console.log(`[Cron] Hours since last taken: ${hoursSinceTaken.toFixed(1)}`);
+
+  if (hoursSinceTaken >= 24) {
+    // Only send ONE reminder per missed window (don't spam every 30 min)
+    if (store.lastReminderSent) {
+      const hoursSinceReminder = (now - store.lastReminderSent) / 1000 / 60 / 60;
+      if (hoursSinceReminder < 12) {
+        console.log('[Cron] Already reminded recently. Skipping.');
+        return;
+      }
     }
-}, {
-    timezone: "Asia/Jerusalem"
+
+    console.log('[Cron] 24+ hours since last dose! Sending reminder.');
+    sendPushToAll("Daily Scoop 🥄", "It's been 24 hours since your last creatine! Time for your daily scoop.");
+    store.lastReminderSent = now;
+  } else {
+    console.log(`[Cron] Only ${hoursSinceTaken.toFixed(1)}h. Next check in 30 min.`);
+  }
 });
 
 app.listen(port, () => {
   console.log(`Backend server running on port ${port}`);
-  console.log('Serving VAPID public key at /vapidPublicKey');
+  console.log('24-hour reminder system active (checks every 30 min)');
 });
