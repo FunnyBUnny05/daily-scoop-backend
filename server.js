@@ -50,9 +50,32 @@ app.post('/mark-taken', (req, res) => {
   res.status(200).json({ message: 'Marked as taken for today.' });
 });
 
-app.get('/test-push', (req, res) => {
-  sendPushToAll("Test Push", "This is a test notification from your cloud backend!");
-  res.send("Pushes sent (check server logs).");
+app.get('/test-push', async (req, res) => {
+  const payload = JSON.stringify({
+    title: "Test Push",
+    body: "This is a test notification from your cloud backend!",
+    icon: '/daily-scoop/favicon.svg'
+  });
+  
+  const endpoints = Object.keys(store.subscriptions);
+  let results = [];
+  
+  for (let endpoint of endpoints) {
+    const sub = {
+      endpoint: endpoint,
+      keys: store.subscriptions[endpoint]
+    };
+    try {
+      await webPush.sendNotification(sub, payload);
+      results.push({ endpoint, status: 'success' });
+    } catch (err) {
+      results.push({ endpoint, status: 'error', code: err.statusCode, message: err.message, body: err.body });
+      if (err.statusCode === 410 || err.statusCode === 404) {
+        delete store.subscriptions[endpoint];
+      }
+    }
+  }
+  res.json({ results, totalSubscriptions: endpoints.length });
 });
 
 app.get('/', (req, res) => {
