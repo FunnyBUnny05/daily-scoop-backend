@@ -22,9 +22,13 @@ webPush.setVapidDetails(
 
 // In-memory store
 const store = {
-  subscriptions: {},       // keyed by endpoint
-  lastTakenTimestamp: null, // epoch ms of last "Mark as Taken"
-  lastReminderSent: null   // epoch ms of last reminder push (to avoid spam)
+  subscriptions: {},  // keyed by endpoint
+  status: {}          // keyed by date string 'YYYY-MM-DD'
+};
+
+const getTodayStr = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
 // Routes
@@ -40,10 +44,10 @@ app.post('/subscribe', (req, res) => {
 });
 
 app.post('/mark-taken', (req, res) => {
-  store.lastTakenTimestamp = Date.now();
-  store.lastReminderSent = null; // Reset so we can remind again 24h from now
-  console.log(`Marked as taken at ${new Date(store.lastTakenTimestamp).toISOString()}`);
-  res.status(200).json({ message: 'Marked as taken.', timestamp: store.lastTakenTimestamp });
+  const dateStr = getTodayStr();
+  store.status[dateStr] = true;
+  console.log(`Marked as taken for ${dateStr}`);
+  res.status(200).json({ message: 'Marked as taken for today.' });
 });
 
 app.get('/test-push', (req, res) => {
@@ -89,39 +93,22 @@ const sendPushToAll = (title, body) => {
   });
 };
 
-// Check every 30 minutes: has it been 24+ hours since last taken?
-cron.schedule('*/30 * * * *', () => {
-  const now = Date.now();
-  console.log(`[Cron] Checking at ${new Date(now).toISOString()}...`);
+// Daily cron at 19:00 Israel time — send push only if not taken today
+cron.schedule('0 19 * * *', () => {
+  const dateStr = getTodayStr();
+  console.log(`[Cron] 19:00 check for ${dateStr}...`);
 
-  // If never taken, don't spam
-  if (!store.lastTakenTimestamp) {
-    console.log('[Cron] No dose recorded yet. Skipping.');
-    return;
-  }
-
-  const hoursSinceTaken = (now - store.lastTakenTimestamp) / 1000 / 60 / 60;
-  console.log(`[Cron] Hours since last taken: ${hoursSinceTaken.toFixed(1)}`);
-
-  if (hoursSinceTaken >= 24) {
-    // Only send ONE reminder per missed window (don't spam every 30 min)
-    if (store.lastReminderSent) {
-      const hoursSinceReminder = (now - store.lastReminderSent) / 1000 / 60 / 60;
-      if (hoursSinceReminder < 12) {
-        console.log('[Cron] Already reminded recently. Skipping.');
-        return;
-      }
-    }
-
-    console.log('[Cron] 24+ hours since last dose! Sending reminder.');
-    sendPushToAll("Daily Scoop 🥄", "It's been 24 hours since your last creatine! Time for your daily scoop.");
-    store.lastReminderSent = now;
+  if (store.status[dateStr]) {
+    console.log('[Cron] Already taken today. No push needed.');
   } else {
-    console.log(`[Cron] Only ${hoursSinceTaken.toFixed(1)}h. Next check in 30 min.`);
+    console.log('[Cron] Not taken yet! Sending reminder push.');
+    sendPushToAll("Daily Scoop 🥄", "Don't lose those gains! Time to take your creatine.");
   }
+}, {
+  timezone: "Asia/Jerusalem"
 });
 
 app.listen(port, () => {
   console.log(`Backend server running on port ${port}`);
-  console.log('24-hour reminder system active (checks every 30 min)');
+  console.log('Daily reminder set for 19:00 Israel time (Asia/Jerusalem)');
 });
